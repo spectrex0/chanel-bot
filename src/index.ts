@@ -21,6 +21,7 @@ import {
   createAudioResource,
   NoSubscriberBehavior,
   StreamType,
+  VoiceConnection,
   VoiceConnectionState,
 } from "@discordjs/voice";
 import { Readable } from "stream";
@@ -51,62 +52,131 @@ const audioPlayer = createAudioPlayer({
   },
 });
 
+const RECONNECT_DELAY_MS = 30_000;
+
+let lastGuildId: string | null = null;
+let lastChannelId: string | null = null;
+let reconnectTimer: NodeJS.Timeout | null = null;
+
+function scheduleReconnect() {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    ensureVoiceConnected();
+  }, RECONNECT_DELAY_MS);
+}
+
+async function connectToVoice(guildId: string, channelId: string): Promise<VoiceConnection> {
+  const guild = bot.guilds.cache.get(guildId);
+  if (!guild) throw new Error(`Gremio no encontrado (guildId=${guildId})`);
+
+  const channel = guild.channels.cache.get(channelId);
+  if (!channel?.isVoiceBased?.()) {
+    throw new Error(`El canal no existe o no es de voz (channelId=${channelId})`);
+  }
+
+  const connection = joinVoiceChannel({
+    channelId,
+    guildId,
+    adapterCreator: guild.voiceAdapterCreator,
+    selfDeaf: true,
+    selfMute: true,
+  });
+
+  connection.on("error", (error) => {
+    console.error("[VOICE] Error en la conexión:", error);
+  });
+
+  try {
+    await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
+  } catch (error) {
+    connection.destroy();
+    throw error;
+  }
+
+  const resource = createAudioResource(createSilenceStream(), {
+    inputType: StreamType.Raw,
+  });
+  audioPlayer.play(resource);
+  connection.subscribe(audioPlayer);
+
+  connection.on(
+    VoiceConnectionStatus.Disconnected,
+    async (oldState: VoiceConnectionState, newState: VoiceConnectionState) => {
+      console.log(`[VOICE] ⚠️ Desconectado (${oldState.status} -> ${newState.status}). Intentando recuperar...`);
+      try {
+        await Promise.race([
+          entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+          entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+        ]);
+        console.log(`[VOICE] Reconectando...`);
+      } catch {
+        console.log(`[VOICE] ❌ No se pudo recuperar la conexión.`);
+        connection.destroy();
+        scheduleReconnect();
+      }
+    },
+  );
+
+  console.log(`[JOIN] Conectado a: ${channel.name} (${channel.id})`);
+  return connection;
+}
+
+async function ensureVoiceConnected(guildId = lastGuildId, channelId = lastChannelId) {
+  if (!guildId || !channelId) return;
+
+  lastGuildId = guildId;
+  lastChannelId = channelId;
+
+  const existing = getVoiceConnection(guildId);
+  if (
+    existing &&
+    [VoiceConnectionStatus.Ready, VoiceConnectionStatus.Connecting, VoiceConnectionStatus.Signalling].includes(
+      existing.state.status,
+    )
+  ) {
+    return;
+  }
+
+  try {
+    await connectToVoice(guildId, channelId);
+  } catch (error) {
+    console.error(`[RECONNECT] Reintento fallido, reintentando en ${RECONNECT_DELAY_MS / 1000}s:`, error);
+    scheduleReconnect();
+  }
+}
+
 const joinCommand = {
   data: new SlashCommandBuilder()
     .setName("join")
     .setDescription("Une al bot al VC actual en modo 24/7"),
 
   async execute(interaction: ChatInputCommandInteraction) {
+    await interaction.deferReply({ flags: 64 });
+
     const member = await interaction.guild?.members.fetch(interaction.user.id);
 
     if (!member?.voice.channel) {
-      return interaction.reply({
+      return interaction.editReply({
         content: "Debes estar en un canal de voz para usar este comando.",
-        flags: 64,
       });
     }
 
+    lastGuildId = interaction.guildId!;
+    lastChannelId = member.voice.channel.id;
+
     try {
-      const connection = joinVoiceChannel({
-        channelId: member.voice.channel.id,
-        guildId: interaction.guildId!,
-        adapterCreator: interaction.guild!.voiceAdapterCreator,
-        selfDeaf: true,
-        selfMute: true,
+      await connectToVoice(lastGuildId, lastChannelId);
+      await interaction.editReply({
+        content: `🎧 Conectado a **${member.voice.channel.name}** en modo 24/7.`,
       });
-
-      await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
-
-      const resource = createAudioResource(createSilenceStream(), {
-        inputType: StreamType.Raw,
-      });
-      audioPlayer.play(resource);
-      connection.subscribe(audioPlayer);
-
-      connection.on(
-        VoiceConnectionStatus.Disconnected,
-        async (oldState: VoiceConnectionState, newState: VoiceConnectionState) => {
-          console.log(`[VOICE] ⚠️ Desconectado. Intentando reconectar...`);
-          try {
-            await Promise.race([
-              entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
-              entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
-            ]);
-            console.log(`[VOICE] Reconectando...`);
-          } catch {
-            console.log(`[VOICE] ❌ No se pudo reconectar. Destruyendo conexión.`);
-            connection.destroy();
-          }
-        },
-      );
-
-      console.log(`[JOIN]  Conectado a: ${member.voice.channel.name}`);
     } catch (error) {
-      console.error("[ERROR] No se pudo unir al VC:", error);
-      await interaction.reply({
-        content: "No pude unirme al canal de voz. Verifica mis permisos.",
-        flags: 64,
-      });
+      console.error("[JOIN] Error al unirse al VC:", error);
+      await interaction
+        .editReply({
+          content: "❌ No pude unirme al canal de voz. Reintentaré automáticamente.",
+        })
+        .catch(() => {});
     }
   },
 };
@@ -131,15 +201,14 @@ const leaveCommand = {
 
     const connection = getVoiceConnection(interaction.guildId!);
 
-    if (!connection) {
-      return interaction.reply({
-        content: "No estoy conectado a ningún canal de voz.",
-        flags: 64,
-      });
+    if (connection) {
+      audioPlayer.stop();
+      connection.destroy();
     }
 
-    audioPlayer.stop();
-    connection.destroy();
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    lastGuildId = null;
+    lastChannelId = null;
 
     await interaction.reply("👋 Me he desconectado del canal de voz.");
   },
@@ -199,6 +268,9 @@ bot.on(Events.InteractionCreate, async (interaction: Interaction) => {
   }
 });
 
+const AUTO_GUILD_ID = process.env.GUILD_ID ?? null;
+const AUTO_VOICE_CHANNEL_ID = process.env.VOICE_CHANNEL_ID ?? null;
+
 bot.once(Events.ClientReady, () => {
   console.log("=====================================");
   console.log(`[BOT] ${bot.user?.username} conectado`);
@@ -206,6 +278,13 @@ bot.once(Events.ClientReady, () => {
   console.log("=====================================");
 
   bot.user?.setStatus("dnd");
+
+  const guildId = AUTO_GUILD_ID ?? lastGuildId;
+  const channelId = AUTO_VOICE_CHANNEL_ID ?? lastChannelId;
+  if (guildId && channelId) {
+    console.log(`[AUTO] Conectando al canal de voz ${channelId}...`);
+    ensureVoiceConnected(guildId, channelId);
+  }
 });
 
 const CANAL_ID = "1533192479023562835";
@@ -259,7 +338,7 @@ const miniServer = express();
 let server: ReturnType<typeof miniServer.listen> | undefined;
 
 miniServer.get("/bump", (_req: Request, res: Response) => {
-  start();
+  ensureVoiceConnected();
   res.send("BUMPED");
 });
 
@@ -271,6 +350,7 @@ async function shutdown(signal: string) {
   console.log(`[SHUTDOWN] ${signal} recibido, cerrando...`);
   try {
     audioPlayer.stop();
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     bot.destroy();
     server?.close();
   } finally {
