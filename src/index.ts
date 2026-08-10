@@ -251,7 +251,7 @@ start();
 
 const miniServer = express()
 
-miniServer.get('/bump', (req, res) => {
+miniServer.get('/bump', (req: Request, res: any) => {
   res.send("BUMPED")
   start()
 })
