@@ -2,25 +2,32 @@
   "name": "bot-de-chanel",
   "version": "1.0.0",
   "description": "bot 24/7 para chanel",
-  "main": "index.js",
+  "main": "dist/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc -b",
-    "dev": "tsx index.ts",
-    "start": "node index.js",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
     "heroku-build": "npm run build"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.3"
+  },
   "dependencies": {
-    "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.2",
     "discord.js": "^14.27.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "libsodium-wrappers": "^0.8.4",
-    "typescript": "^7.0.2"
+    "opusscript": "^0.0.8"
   }
 }

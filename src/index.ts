@@ -1,17 +1,16 @@
 import "dotenv/config";
-import express from 'express'
+import express, { type Request, type Response } from "express";
 import {
   Client,
   GatewayIntentBits,
   Collection,
   REST,
   Routes,
-  ActivityType,
   Events,
   Interaction,
   SlashCommandBuilder,
   ChatInputCommandInteraction,
-  GuildMember,
+  Message,
 } from "discord.js";
 import {
   joinVoiceChannel,
@@ -20,11 +19,12 @@ import {
   entersState,
   createAudioPlayer,
   createAudioResource,
-  AudioPlayerStatus,
   NoSubscriberBehavior,
   StreamType,
+  VoiceConnectionState,
 } from "@discordjs/voice";
-import { Readable } from "stream"; 
+import { Readable } from "stream";
+
 const bot = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -34,7 +34,7 @@ const bot = new Client({
     GatewayIntentBits.MessageContent,
   ],
 });
- 
+
 function createSilenceStream() {
   const SILENCE_FRAME = Buffer.from([0xf8, 0xff, 0xfe]);
   const silenceStream = new Readable({
@@ -50,7 +50,6 @@ const audioPlayer = createAudioPlayer({
     noSubscriber: NoSubscriberBehavior.Pause,
   },
 });
- 
 
 const joinCommand = {
   data: new SlashCommandBuilder()
@@ -77,29 +76,31 @@ const joinCommand = {
       });
 
       await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
- 
+
       const resource = createAudioResource(createSilenceStream(), {
         inputType: StreamType.Raw,
       });
       audioPlayer.play(resource);
       connection.subscribe(audioPlayer);
- 
-      connection.on(VoiceConnectionStatus.Disconnected, async (oldState, newState) => {
-        console.log(`[VOICE] ⚠️ Desconectado. Intentando reconectar...`);
-        try { 
-          await Promise.race([
-            entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
-            entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
-          ]);
-          console.log(`[VOICE] Reconectando...`);
-        } catch {
-          console.log(`[VOICE] ❌ No se pudo reconectar. Destruyendo conexión.`);
-          connection.destroy();
-        }
-      });
+
+      connection.on(
+        VoiceConnectionStatus.Disconnected,
+        async (oldState: VoiceConnectionState, newState: VoiceConnectionState) => {
+          console.log(`[VOICE] ⚠️ Desconectado. Intentando reconectar...`);
+          try {
+            await Promise.race([
+              entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+              entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+            ]);
+            console.log(`[VOICE] Reconectando...`);
+          } catch {
+            console.log(`[VOICE] ❌ No se pudo reconectar. Destruyendo conexión.`);
+            connection.destroy();
+          }
+        },
+      );
 
       console.log(`[JOIN]  Conectado a: ${member.voice.channel.name}`);
-
     } catch (error) {
       console.error("[ERROR] No se pudo unir al VC:", error);
       await interaction.reply({
@@ -110,7 +111,6 @@ const joinCommand = {
   },
 };
 
-// /leave
 const AUTHORIZED_IDS = [
   "1197314280903680063",
   "1397819397468323961",
@@ -144,16 +144,16 @@ const leaveCommand = {
     await interaction.reply("👋 Me he desconectado del canal de voz.");
   },
 };
- 
-const commands = new Collection<string, typeof joinCommand | typeof leaveCommand>();
+
+const commands = new Collection<
+  string,
+  typeof joinCommand | typeof leaveCommand
+>();
 commands.set("join", joinCommand);
 commands.set("leave", leaveCommand);
 
-const commandsJSON = [
-  joinCommand.data.toJSON(),
-  leaveCommand.data.toJSON(),
-];
- 
+const commandsJSON = [joinCommand.data.toJSON(), leaveCommand.data.toJSON()];
+
 async function deployCommands() {
   const token = process.env.TOKEN;
   const clientId = process.env.BOT_ID;
@@ -198,7 +198,7 @@ bot.on(Events.InteractionCreate, async (interaction: Interaction) => {
     }
   }
 });
- 
+
 bot.once(Events.ClientReady, () => {
   console.log("=====================================");
   console.log(`[BOT] ${bot.user?.username} conectado`);
@@ -206,20 +206,18 @@ bot.once(Events.ClientReady, () => {
   console.log("=====================================");
 
   bot.user?.setStatus("dnd");
-  // bot.user?.setActivity({
-  //   name: "Chanel, lo más rico",
-  //   type: ActivityType.Playing,
-  // });
 });
 
 const CANAL_ID = "1533192479023562835";
 
-
-bot.on("messageCreate", async (message) => { 
+bot.on("messageCreate", async (message: Message) => {
   if (message.author.bot) return;
 
   if (message.channel.id !== CANAL_ID) return;
 
+  if (!message.channel.isSendable()) return;
+
+  const channel = message.channel;
   const contenido = message.content.trim();
 
   if (!/^\d+$/.test(contenido)) return;
@@ -228,12 +226,17 @@ bot.on("messageCreate", async (message) => {
   const siguiente = numero + 1;
 
   setTimeout(() => {
-    message.channel.send(`${siguiente}`).catch(console.error);
+    channel.send(`${siguiente}`).catch(console.error);
   }, 3000);
 });
 
+let starting = false;
 
 async function start() {
+  if (starting) return;
+  if (bot.isReady()) return;
+
+  starting = true;
   try {
     await deployCommands();
 
@@ -244,19 +247,45 @@ async function start() {
   } catch (error) {
     console.error("[FATAL] Error al iniciar el bot:", error);
     process.exit(1);
+  } finally {
+    starting = false;
   }
 }
 
+const PORT = Number(process.env.PORT) || 3000;
+
+const miniServer = express();
+
+let server: ReturnType<typeof miniServer.listen> | undefined;
+
+miniServer.get("/bump", (_req: Request, res: Response) => {
+  start();
+  res.send("BUMPED");
+});
+
+miniServer.get("/health", (_req: Request, res: Response) => {
+  res.send(bot.isReady() ? "OK" : "STARTING");
+});
+
+async function shutdown(signal: string) {
+  console.log(`[SHUTDOWN] ${signal} recibido, cerrando...`);
+  try {
+    audioPlayer.stop();
+    bot.destroy();
+    server?.close();
+  } finally {
+    process.exit(0);
+  }
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("unhandledRejection", (reason) => {
+  console.error("[ERROR] Promesa sin manejar:", reason);
+});
+
+server = miniServer.listen(PORT, () => {
+  console.log(`[HTTP] Servidor ejecutado en el puerto ${PORT}`);
+});
+
 start();
-
-const miniServer = express()
-
-miniServer.get('/bump', (req: Request, res: any) => {
-  res.send("BUMPED")
-  start()
-})
-
-
-miniServer.listen(3000, () => {
-  console.log("SERVIDOR EJECUTADO")
-})
