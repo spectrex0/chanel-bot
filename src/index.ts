@@ -72,8 +72,8 @@ const joinCommand = {
         channelId: member.voice.channel.id,
         guildId: interaction.guildId!,
         adapterCreator: interaction.guild!.voiceAdapterCreator,
-        selfDeaf: false,
-        selfMute: false,
+        selfDeaf: true,
+        selfMute: true,
       });
 
       await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
@@ -171,7 +171,6 @@ async function deployCommands() {
   console.log(`[DEPLOY] ${commandsJSON.length} comandos registrados en Discord`);
 }
 
-// ==================== EVENT: INTERACCIONES ====================
 bot.on(Events.InteractionCreate, async (interaction: Interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -213,7 +212,27 @@ bot.once(Events.ClientReady, () => {
   // });
 });
 
-// ==================== INICIAR ====================
+const CANAL_ID = "1533192479023562835";
+
+
+bot.on("messageCreate", async (message) => { 
+  if (message.author.bot) return;
+
+  if (message.channel.id !== CANAL_ID) return;
+
+  const contenido = message.content.trim();
+
+  if (!/^\d+$/.test(contenido)) return;
+
+  const numero = parseInt(contenido, 10);
+  const siguiente = numero + 1;
+
+  setTimeout(() => {
+    message.channel.send(`${siguiente}`).catch(console.error);
+  }, 3000);
+});
+
+
 async function start() {
   try {
     await deployCommands();
