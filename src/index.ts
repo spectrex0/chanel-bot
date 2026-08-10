@@ -25,6 +25,7 @@ import {
   VoiceConnectionState,
 } from "@discordjs/voice";
 import { Readable } from "stream";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 
 const bot = new Client({
   intents: [
@@ -53,10 +54,36 @@ const audioPlayer = createAudioPlayer({
 });
 
 const RECONNECT_DELAY_MS = 30_000;
+const VOICE_TARGET_FILE = ".voice-target.json";
 
 let lastGuildId: string | null = null;
 let lastChannelId: string | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
+
+function loadVoiceTarget() {
+  try {
+    if (existsSync(VOICE_TARGET_FILE)) {
+      const data = JSON.parse(readFileSync(VOICE_TARGET_FILE, "utf8"));
+      if (typeof data.guildId === "string" && typeof data.channelId === "string") {
+        lastGuildId = data.guildId;
+        lastChannelId = data.channelId;
+        console.log(`[VOICE] Objetivo restaurado: ${lastChannelId}`);
+      }
+    }
+  } catch (error) {
+    console.error("[VOICE] No se pudo leer la persistencia:", error);
+  }
+}
+
+function saveVoiceTarget() {
+  try {
+    writeFileSync(VOICE_TARGET_FILE, JSON.stringify({ guildId: lastGuildId, channelId: lastChannelId }));
+  } catch (error) {
+    console.error("[VOICE] No se pudo guardar la persistencia:", error);
+  }
+}
+
+loadVoiceTarget();
 
 function scheduleReconnect() {
   if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -127,6 +154,7 @@ async function ensureVoiceConnected(guildId = lastGuildId, channelId = lastChann
 
   lastGuildId = guildId;
   lastChannelId = channelId;
+  saveVoiceTarget();
 
   const existing = getVoiceConnection(guildId);
   if (
@@ -164,6 +192,7 @@ const joinCommand = {
 
     lastGuildId = interaction.guildId!;
     lastChannelId = member.voice.channel.id;
+    saveVoiceTarget();
 
     try {
       await connectToVoice(lastGuildId, lastChannelId);
@@ -172,6 +201,7 @@ const joinCommand = {
       });
     } catch (error) {
       console.error("[JOIN] Error al unirse al VC:", error);
+      scheduleReconnect();
       await interaction
         .editReply({
           content: "❌ No pude unirme al canal de voz. Reintentaré automáticamente.",
@@ -209,6 +239,7 @@ const leaveCommand = {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     lastGuildId = null;
     lastChannelId = null;
+    saveVoiceTarget();
 
     await interaction.reply("👋 Me he desconectado del canal de voz.");
   },
@@ -287,27 +318,6 @@ bot.once(Events.ClientReady, () => {
   }
 });
 
-const CANAL_ID = "1533192479023562835";
-
-bot.on("messageCreate", async (message: Message) => {
-  if (message.author.bot) return;
-
-  if (message.channel.id !== CANAL_ID) return;
-
-  if (!message.channel.isSendable()) return;
-
-  const channel = message.channel;
-  const contenido = message.content.trim();
-
-  if (!/^\d+$/.test(contenido)) return;
-
-  const numero = parseInt(contenido, 10);
-  const siguiente = numero + 1;
-
-  setTimeout(() => {
-    channel.send(`${siguiente}`).catch(console.error);
-  }, 3000);
-});
 
 let starting = false;
 
